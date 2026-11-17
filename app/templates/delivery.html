@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}供数记录 · 任务 #{{ row.id }} · SNP 指纹核对{% endblock %}
+{% block body %}
+<h1>供数记录
+  <span class="tag tag-warn">任务 #{{ row.id }}</span>
+</h1>
+
+<div class="card">
+  <p>
+    <strong>交接编号：</strong><code>{{ delivery.handover_no }}</code>
+    ｜<strong>基于修订号：</strong>r{{ delivery.revision }}
+    ｜<strong>登记时间 (UTC)：</strong>{{ delivery.created_at }}
+  </p>
+  <p>
+    <strong>当前状态：</strong>
+    {% if status == 'valid' %}
+      <span class="tag tag-ok">仍有效</span> 当前唯一完整对应与本记录一致。
+    {% elif status == 'recheck' %}
+      <span class="tag tag-warn">待复核</span> 当前没有唯一完整对应（存在歧义或无解），暂无法判定该文件是否仍适用。
+    {% else %}
+      <span class="tag tag-bad">应撤回</span> 当前唯一完整对应已与本记录不同，旧文件应撤回。
+    {% endif %}
+  </p>
+  <p class="muted">
+    本记录与下方对照是登记当时固化下来的不可变快照，之后的锁定/解锁与重新供数都不会改写它。
+    状态只是按“当前对应”实时计算出的提示。
+  </p>
+  <p>
+    <a class="btn btn-primary"
+       href="{{ url_for('delivery_download', dataset_id=row.id, delivery_id=delivery.id) }}">
+      取回原文件 {{ filename }}
+    </a>
+    <a class="btn" style="background:#e4e8ed;color:#333;margin-left:8px"
+       href="{{ url_for('dataset_detail', dataset_id=row.id) }}">返回任务详情</a>
+  </p>
+</div>
+
+<div class="card">
+  <h2>登记时的完整对应（{{ mapping|length }} 个样本）</h2>
+  <table>
+    <thead><tr>
+      <th class="id">匿名侧样本</th>
+      <th class="id">院内侧编号</th>
+      <th>共非空位点数</th>
+      <th>不一致位点数</th>
+      <th>当前候选</th>
+    </tr></thead>
+    <tbody>
+    {% for m in mapping %}
+      <tr>
+        <td class="id">{{ m.left_id }}</td>
+        <td class="id">{{ m.right_id }}</td>
+        <td>{{ m.shared }}</td>
+        <td>{{ m.mismatches }}</td>
+        <td>
+          {% if m.current|length == 1 and m.current[0] == m.right_id %}
+            <span class="tag tag-ok">{{ m.current[0] }}</span>
+          {% elif m.current %}
+            <span class="tag tag-warn">{{ m.current|join('、') }}</span>
+          {% else %}
+            <span class="tag tag-bad">无候选</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -80,3 +80,36 @@ def test_wal_mode_enabled(store):
     with store._connect() as conn:
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
     assert mode.lower() == "wal"
+
+
+# ------------------------------------------------------------ 供数记录
+MAPPING = [("L1", "R1", 0, 6), ("L2", "R2", 0, 6)]
+CSV_BYTES = b"\xef\xbb\xbfleft_sample_id,right_sample_id\n"
+
+
+def test_delivery_is_unique_per_dataset_and_handover(store):
+    ds = store.create_dataset("左", "右", LOCI, LEFT, RIGHT, 0, True, None)
+    with store.transaction() as conn:
+        first = store.add_delivery(conn, ds, "HO-1", 1, MAPPING, CSV_BYTES)
+    assert store.get_delivery(ds, "HO-1")["id"] == first
+    # 同一任务同一交接编号再次登记必须失败，不能覆盖原记录
+    with pytest.raises(sqlite3.IntegrityError):
+        with store.transaction() as conn:
+            store.add_delivery(conn, ds, "HO-1", 5, [("L1", "R2", 0, 6)], b"x")
+    row = store.get_delivery(ds, "HO-1")
+    assert row["revision"] == 1 and row["csv_content"] == CSV_BYTES
+    # 不同任务可以使用相同交接编号
+    ds2 = store.create_dataset("左", "右", LOCI, LEFT, RIGHT, 0, True, None)
+    with store.transaction() as conn:
+        store.add_delivery(conn, ds2, "HO-1", 1, MAPPING, CSV_BYTES)
+    assert store.get_delivery(ds2, "HO-1") is not None
+
+
+def test_delivery_survives_store_recreate(store, tmp_path):
+    ds = store.create_dataset("左", "右", LOCI, LEFT, RIGHT, 0, True, None)
+    with store.transaction() as conn:
+        store.add_delivery(conn, ds, "HO-2", 7, MAPPING, CSV_BYTES)
+    reopened = Store(store.db_path)
+    row = reopened.get_delivery(ds, "HO-2")
+    assert row["revision"] == 7 and row["csv_content"] == CSV_BYTES
+    assert [tuple(x) for x in __import__("json").loads(row["mapping_json"])] == MAPPING

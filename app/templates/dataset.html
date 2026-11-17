@@ -120,21 +120,74 @@
     </tbody>
   </table>
 </div>
+{% endif %}
 
 <div class="card">
-  <h2>下载编号对照 CSV</h2>
+  <h2>登记供数与下载编号对照 CSV</h2>
   {% if all_resolved %}
     <p>全部 {{ result.left_ids|length }} 个样本候选均已唯一，可以供数。</p>
-    <a class="btn btn-primary" href="{{ url_for('download_mapping', dataset_id=row.id) }}">下载编号对照 CSV</a>
+    <form method="post" action="{{ url_for('deliver_mapping', dataset_id=row.id) }}">
+      <input type="hidden" name="revision" value="{{ row.revision }}">
+      <label class="id" for="handover_no">交接编号：</label>
+      <input type="text" id="handover_no" name="handover_no" required maxlength="64"
+             placeholder="例如 HO-2026-0001" size="28">
+      <button class="btn btn-primary" type="submit">生成对照 CSV 并登记供数记录</button>
+    </form>
+    <p class="muted" style="margin-top:10px">
+      登记时会把当前完整对应、修订号 r{{ row.revision }} 与实际文件一并固化为不可变记录。
+      同一交接编号重复提交将返回原记录与原文件，不会覆盖。
+    </p>
   {% else %}
+    {% if result.feasible %}
     <p>仍有样本存在歧义，按规定<strong>不得供数</strong>。请继续依据外部证据锁定，直到全部样本候选唯一。</p>
-    <button class="btn btn-muted" disabled>下载（需全部唯一）</button>
+    <button class="btn btn-muted" disabled>生成对照 CSV 并登记（需全部唯一）</button>
     <p class="muted">尚未唯一的样本：
       {% for lid in result.left_ids %}
         {% if result.candidates[lid]|length != 1 and not locks.get(lid) %}<code>{{ lid }}</code>（{{ result.candidates[lid]|length }} 个候选）{% endif %}
       {% endfor %}
     </p>
+    {% else %}
+    <p>任务当前无解，<strong>不得供数</strong>。原因见上方“无解原因”。</p>
+    <button class="btn btn-muted" disabled>生成对照 CSV 并登记（当前无解）</button>
+    {% endif %}
   {% endif %}
 </div>
-{% endif %}
+
+<div class="card">
+  <h2>供数记录</h2>
+  {% if deliveries %}
+  <table>
+    <thead><tr>
+      <th>交接编号</th><th>登记时修订号</th><th>登记时间 (UTC)</th>
+      <th>状态</th><th>操作</th>
+    </tr></thead>
+    <tbody>
+    {% for d in deliveries %}
+      <tr>
+        <td class="id"><code>{{ d.row.handover_no }}</code></td>
+        <td>r{{ d.row.revision }}</td>
+        <td>{{ d.row.created_at }}</td>
+        <td>
+          {% if d.status == 'valid' %}<span class="tag tag-ok">仍有效</span>
+          {% elif d.status == 'recheck' %}<span class="tag tag-warn">待复核</span>
+          {% else %}<span class="tag tag-bad">应撤回</span>{% endif %}
+        </td>
+        <td style="white-space:nowrap">
+          <a class="btn btn-primary"
+             href="{{ url_for('delivery_detail', dataset_id=row.id, delivery_id=d.row.id) }}">查看原对照</a>
+          <a class="btn" style="background:#e4e8ed;color:#333;margin-left:6px"
+             href="{{ url_for('delivery_download', dataset_id=row.id, delivery_id=d.row.id) }}">取回原文件</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted" style="margin-top:10px">
+    状态按当前完整对应实时计算：一致为“仍有效”；当前无唯一对应（歧义或无解）为“待复核”；
+    当前唯一对应已与记录不同为“应撤回”。记录本身始终保持登记时的原样。
+  </p>
+  {% else %}
+  <p class="muted">尚无供数记录。</p>
+  {% endif %}
+</div>
 {% endblock %}

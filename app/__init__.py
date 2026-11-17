@@ -5,10 +5,13 @@
 GET  /                     任务列表
 GET  /upload               上传表单
 POST /upload               上传两份 CSV，校验后建任务
-GET  /datasets/<id>        核对详情（候选、锁定、修订号）
+GET  /datasets/<id>        核对详情（候选、锁定、修订号、供数记录）
 POST /datasets/<id>/lock   按外部证据锁定候选（带修订号乐观并发控制）
 POST /datasets/<id>/unlock 解除锁定
-GET  /datasets/<id>/download 全部唯一时下载编号对照 CSV
+POST /datasets/<id>/deliver 按交接编号生成对照 CSV 并登记不可变供数记录
+GET  /datasets/<id>/deliveries/<delivery_id>          查看某次供数的原始对照
+GET  /datasets/<id>/deliveries/<delivery_id>/download 取回该次供数的原文件
+GET  /datasets/<id>/download 旧链接：改为引导到交接编号登记，不直接供数
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ import io
 import json
 import os
 import sqlite3
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from flask import (Flask, abort, flash, redirect, render_template, request,
                    send_file, url_for)
@@ -25,6 +28,43 @@ from flask import (Flask, abort, flash, redirect, render_template, request,
 from . import csvio
 from .matching import all_resolved, analyze
 from .storage import Store
+
+MAX_HANDOVER_NO = 64
+
+
+def build_mapping_csv(result) -> Tuple[List[Tuple[str, str, int, int]], bytes]:
+    """把“全部唯一”的分析结果固化为对照行与 CSV 字节。"""
+    rows: List[Tuple[str, str, int, int]] = []
+    buf = io.StringIO()
+    buf.write("left_sample_id,right_sample_id,mismatched_loci,shared_loci\n")
+    for lid in result.left_ids:
+        rid = result.candidates[lid][0]
+        info = result.pair_infos[(lid, rid)]
+        rows.append((lid, rid, info.mismatches, info.shared))
+        buf.write("%s,%s,%d,%d\n" % (lid, rid, info.mismatches, info.shared))
+    return rows, buf.getvalue().encode("utf-8-sig")
+
+
+def delivery_status(mapping_json: str, current: Dict[str, str]) -> str:
+    """按当前完整对应判定历史供数记录的状态。
+
+    valid      当前仍有唯一完整对应，且与该记录完全一致
+    recheck    当前没有唯一对应（存在歧义或无解），需人工复核
+    withdraw   当前对应已唯一但与记录不同，旧文件应撤回
+    """
+    if not current:
+        return "recheck"
+    recorded = {row[0]: row[1] for row in json.loads(mapping_json)}
+    if recorded == current:
+        return "valid"
+    return "withdraw"
+
+
+def current_mapping(result) -> Dict[str, str]:
+    """当前唯一完整对应；不唯一或无解时返回空字典。"""
+    if not all_resolved(result):
+        return {}
+    return {lid: result.candidates[lid][0] for lid in result.left_ids}
 
 
 def create_app(db_path: Optional[str] = None) -> Flask:
@@ -40,14 +80,26 @@ def create_app(db_path: Optional[str] = None) -> Flask:
 
     # ----------------------------------------------------------- 工具函数
     def load_context(dataset_id: int) -> Dict[str, Any]:
-        row = store.get_dataset(dataset_id)
-        if row is None:
-            abort(404)
-        left_samples = store.get_samples(dataset_id, "left")
-        right_samples = store.get_samples(dataset_id, "right")
-        locks = store.get_locks(dataset_id)
+        # 只读快照：数据集、样本、锁定、供数记录与状态来自同一个已提交状态，
+        # 页面不会出现“新锁定 + 旧供数记录”这类拼接。
+        with store.read_snapshot() as conn:
+            row = store.get_dataset_in(conn, dataset_id)
+            if row is None:
+                abort(404)
+            left_samples = store.get_samples_in(conn, dataset_id, "left")
+            right_samples = store.get_samples_in(conn, dataset_id, "right")
+            locks = store.get_locks_in(conn, dataset_id)
+            delivery_rows = store.list_deliveries_in(conn, dataset_id)
         loci = json.loads(row["loci_json"])
         result = analyze(left_samples, right_samples, loci, locks)
+        current = current_mapping(result)
+        deliveries = []
+        for d in delivery_rows:
+            deliveries.append({
+                "row": d,
+                "mapping": json.loads(d["mapping_json"]),
+                "status": delivery_status(d["mapping_json"], current),
+            })
         return {
             "row": row,
             "left_samples": left_samples,
@@ -56,6 +108,7 @@ def create_app(db_path: Optional[str] = None) -> Flask:
             "loci": loci,
             "result": result,
             "all_resolved": all_resolved(result),
+            "deliveries": deliveries,
         }
 
     def conflict(message: str, dataset_id: int):
@@ -302,35 +355,162 @@ def create_app(db_path: Optional[str] = None) -> Flask:
     # --------------------------------------------------------------- 下载
     @app.route("/datasets/<int:dataset_id>/download")
     def download_mapping(dataset_id: int):
+        """旧版直链：供数必须经交接编号登记，这里只做引导，不产出文件。"""
         ctx = load_context(dataset_id)
-        result = ctx["result"]
-        if not result.feasible:
-            flash("无解任务不能下载编号对照：%s" % result.reason, "error")
+        if not all_resolved(ctx["result"]):
+            flash("尚未全部唯一，不能供数；请先完成消歧后按交接编号登记。", "error")
+        else:
+            flash("请填写交接编号并登记供数记录后，再取回对应文件。", "info")
+        return redirect(url_for("dataset_detail", dataset_id=dataset_id))
+
+    # --------------------------------------------------------------- 供数
+    def delivery_filename(dataset_id: int, handover_no: str) -> str:
+        safe = "".join(
+            ch if (ch.isalnum() or ch in "-_.") else "_" for ch in handover_no
+        )
+        return "mapping_dataset_%d_%s.csv" % (dataset_id, safe)
+
+    @app.route("/datasets/<int:dataset_id>/deliver", methods=["POST"])
+    def deliver_mapping(dataset_id: int):
+        handover_no = (request.form.get("handover_no") or "").strip()
+        try:
+            seen_revision = int(request.form.get("revision", ""))
+        except (TypeError, ValueError):
+            return conflict("表单缺少修订号，请刷新页面后重试。", dataset_id)
+
+        if not handover_no:
+            flash("供数失败：请填写交接编号。", "error")
             return redirect(url_for("dataset_detail", dataset_id=dataset_id))
-        if not all_resolved(result):
-            ambiguous = [lid for lid, c in result.candidates.items()
-                         if len(c) != 1]
-            flash(
-                "仍有 %d 个样本存在歧义（%s），按规定不得供数；"
-                "请继续按外部证据锁定消歧。"
-                % (len(ambiguous), "、".join(ambiguous)),
-                "error",
-            )
+        if len(handover_no) > MAX_HANDOVER_NO:
+            flash("供数失败：交接编号不能超过 %d 个字符。" % MAX_HANDOVER_NO,
+                  "error")
             return redirect(url_for("dataset_detail", dataset_id=dataset_id))
 
-        buf = io.StringIO()
-        buf.write("left_sample_id,right_sample_id,mismatched_loci,shared_loci\n")
-        for lid in result.left_ids:
-            rid = result.candidates[lid][0]
-            info = result.pair_infos[(lid, rid)]
-            buf.write("%s,%s,%d,%d\n"
-                      % (lid, rid, info.mismatches, info.shared))
-        data = buf.getvalue().encode("utf-8-sig")
+        # 读取当前状态、校验唯一性、固化快照、登记记录、推进修订号全部在
+        # 同一个 IMMEDIATE 事务内完成：文件、记录与修订号来自同一已提交状态，
+        # 期间任何锁定/解锁都无法插队。
+        try:
+            with store.transaction() as conn:
+                row = store.get_dataset_in(conn, dataset_id)
+                if row is None:
+                    abort(404)
+
+                # 幂等优先：同一任务内同一交接编号已登记时，无条件取回原记录，
+                # 即使页面修订号已过期也不重新生成、不覆盖。
+                existing = store.get_delivery_in(conn, dataset_id, handover_no)
+                if existing is not None:
+                    flash(
+                        "交接编号 %s 已于 %s（基于修订号 r%d）登记，返回原记录与原文件，"
+                        "未做任何覆盖。"
+                        % (handover_no, existing["created_at"],
+                           existing["revision"]),
+                        "info",
+                    )
+                    return redirect(url_for(
+                        "delivery_detail", dataset_id=dataset_id,
+                        delivery_id=existing["id"],
+                    ))
+
+                if row["revision"] != seen_revision:
+                    return conflict(
+                        "页面修订号已过期（您看到的是 r%d，当前为 r%d），"
+                        "可能有其他人刚提交了锁定或供数。请刷新页面确认当前对应后再登记。"
+                        % (seen_revision, row["revision"]),
+                        dataset_id,
+                    )
+
+                left_samples = store.get_samples_in(conn, dataset_id, "left")
+                right_samples = store.get_samples_in(conn, dataset_id, "right")
+                locks = store.get_locks_in(conn, dataset_id)
+                result = analyze(left_samples, right_samples,
+                                 json.loads(row["loci_json"]), locks)
+
+                if not result.feasible:
+                    flash("供数失败：任务当前无解（%s），未生成文件，也未登记记录。"
+                          % result.reason, "error")
+                    return redirect(url_for("dataset_detail",
+                                            dataset_id=dataset_id))
+                if not all_resolved(result):
+                    ambiguous = [lid for lid, c in result.candidates.items()
+                                 if len(c) != 1]
+                    flash(
+                        "供数失败：仍有 %d 个样本不唯一（%s），按规定不得供数；"
+                        "未生成文件，也未登记记录。"
+                        % (len(ambiguous), "、".join(ambiguous)),
+                        "error",
+                    )
+                    return redirect(url_for("dataset_detail",
+                                            dataset_id=dataset_id))
+
+                mapping, csv_content = build_mapping_csv(result)
+                delivery_id = store.add_delivery(
+                    conn, dataset_id, handover_no, row["revision"],
+                    mapping, csv_content,
+                )
+                store.bump_revision(conn, dataset_id)
+        except sqlite3.IntegrityError:
+            # 并发下同一交接编号被另一请求抢先登记：取回先提交的那份
+            existing = store.get_delivery(dataset_id, handover_no)
+            if existing is None:
+                flash("供数登记失败，未生成文件；请刷新页面后重试。", "error")
+                return redirect(url_for("dataset_detail", dataset_id=dataset_id))
+            flash("交接编号 %s 已被并发登记，返回原记录与原文件。" % handover_no,
+                  "info")
+            return redirect(url_for(
+                "delivery_detail", dataset_id=dataset_id,
+                delivery_id=existing["id"],
+            ))
+        except sqlite3.Error as exc:
+            flash("供数登记失败，未生成文件，已有判断与记录均未改变：%s" % exc,
+                  "error")
+            return redirect(url_for("dataset_detail", dataset_id=dataset_id))
+
+        flash(
+            "已按交接编号 %s 生成对照文件并登记供数记录（基于修订号 r%d）。"
+            % (handover_no, seen_revision),
+            "info",
+        )
+        return redirect(url_for(
+            "delivery_detail", dataset_id=dataset_id, delivery_id=delivery_id,
+        ))
+
+    @app.route("/datasets/<int:dataset_id>/deliveries/<int:delivery_id>")
+    def delivery_detail(dataset_id: int, delivery_id: int):
+        ctx = load_context(dataset_id)
+        rec = store.get_delivery_by_id(dataset_id, delivery_id)
+        if rec is None:
+            abort(404)
+        mapping = json.loads(rec["mapping_json"])
+        # 原始对照按记录固化内容展示，不受当前锁定变化影响
+        rows = []
+        for lid, rid, mismatches, shared in mapping:
+            rows.append({
+                "left_id": lid,
+                "right_id": rid,
+                "mismatches": mismatches,
+                "shared": shared,
+                "current": ctx["result"].candidates.get(lid, []),
+            })
+        return render_template(
+            "delivery.html",
+            row=ctx["row"],
+            delivery=rec,
+            mapping=rows,
+            status=delivery_status(rec["mapping_json"],
+                                   current_mapping(ctx["result"])),
+            filename=delivery_filename(dataset_id, rec["handover_no"]),
+        )
+
+    @app.route("/datasets/<int:dataset_id>/deliveries/<int:delivery_id>/download")
+    def delivery_download(dataset_id: int, delivery_id: int):
+        rec = store.get_delivery_by_id(dataset_id, delivery_id)
+        if rec is None:
+            abort(404)
         return send_file(
-            io.BytesIO(data),
+            io.BytesIO(rec["csv_content"]),
             mimetype="text/csv; charset=utf-8",
             as_attachment=True,
-            download_name="mapping_dataset_%d.csv" % dataset_id,
+            download_name=delivery_filename(dataset_id, rec["handover_no"]),
         )
 
     @app.errorhandler(404)

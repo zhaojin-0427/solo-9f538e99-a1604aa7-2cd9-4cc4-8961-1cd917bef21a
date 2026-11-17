@@ -54,6 +54,33 @@ CREATE TABLE IF NOT EXISTS locks (
     locked_at     TEXT NOT NULL,
     PRIMARY KEY (dataset_id, left_id)
 );
+
+-- 供数（交接）记录：一次登记一份不可变快照，保存生成时的完整对应、修订号
+-- 以及实际交付的 CSV 字节。同一任务内交接编号唯一；重复提交按唯一键取回
+-- 原记录，绝不覆盖。
+CREATE TABLE IF NOT EXISTS deliveries (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset_id    INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+    handover_no   TEXT NOT NULL,
+    revision      INTEGER NOT NULL,
+    mapping_json  TEXT NOT NULL,
+    csv_content   BLOB NOT NULL,
+    created_at    TEXT NOT NULL,
+    UNIQUE (dataset_id, handover_no)
+);
+
+-- 数据库层兜底：供数记录一经登记即不可改写/删除。
+CREATE TRIGGER IF NOT EXISTS deliveries_no_update
+BEFORE UPDATE ON deliveries
+BEGIN
+    SELECT RAISE(ABORT, '供数记录不可改写');
+END;
+
+CREATE TRIGGER IF NOT EXISTS deliveries_no_delete
+BEFORE DELETE ON deliveries
+BEGIN
+    SELECT RAISE(ABORT, '供数记录不可删除');
+END;
 """
 
 
@@ -92,6 +119,17 @@ class Store:
         finally:
             conn.close()
 
+    @contextmanager
+    def read_snapshot(self):
+        """只读事务：多条 SELECT 看到同一个已提交状态（WAL 快照）。"""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            yield conn
+        finally:
+            conn.rollback()
+            conn.close()
+
     # ------------------------------------------------------------------ 读
     def get_dataset(self, dataset_id: int) -> Optional[sqlite3.Row]:
         with self._connect() as conn:
@@ -124,7 +162,53 @@ class Store:
             ).fetchall()
             return {r["left_id"]: r["right_id"] for r in rows}
 
+    def get_delivery(self, dataset_id: int,
+                     handover_no: str) -> Optional[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM deliveries WHERE dataset_id = ? AND handover_no = ?",
+                (dataset_id, handover_no),
+            ).fetchone()
+
+    def get_delivery_by_id(self, dataset_id: int,
+                           delivery_id: int) -> Optional[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM deliveries WHERE dataset_id = ? AND id = ?",
+                (dataset_id, delivery_id),
+            ).fetchone()
+
+    def list_deliveries(self, dataset_id: int) -> List[sqlite3.Row]:
+        with self._connect() as conn:
+            return list(conn.execute(
+                "SELECT * FROM deliveries WHERE dataset_id = ? ORDER BY id",
+                (dataset_id,),
+            ).fetchall())
+
     # ------------------------------------------------------------------ 写
+    def get_dataset_in(self, conn: sqlite3.Connection,
+                       dataset_id: int) -> Optional[sqlite3.Row]:
+        return conn.execute(
+            "SELECT * FROM datasets WHERE id = ?", (dataset_id,)
+        ).fetchone()
+
+    def get_samples_in(self, conn: sqlite3.Connection, dataset_id: int,
+                       side: str) -> List[Tuple[str, List[Optional[int]]]]:
+        rows = conn.execute(
+            "SELECT sample_id, genotype_json FROM samples "
+            "WHERE dataset_id = ? AND side = ? ORDER BY idx",
+            (dataset_id, side),
+        ).fetchall()
+        return [(r["sample_id"], json.loads(r["genotype_json"])) for r in rows]
+
+    def get_locks_in(self, conn: sqlite3.Connection,
+                     dataset_id: int) -> Dict[str, str]:
+        rows = conn.execute(
+            "SELECT left_id, right_id FROM locks WHERE dataset_id = ?",
+            (dataset_id,),
+        ).fetchall()
+        return {r["left_id"]: r["right_id"] for r in rows}
+
     def create_dataset(self,
                        left_label: str,
                        right_label: str,
@@ -162,6 +246,39 @@ class Store:
             "UPDATE datasets SET revision = revision + 1 WHERE id = ?",
             (dataset_id,),
         )
+
+    def add_delivery(self, conn: sqlite3.Connection, dataset_id: int,
+                     handover_no: str, revision: int,
+                     mapping: Sequence[Tuple[str, str, int, int]],
+                     csv_content: bytes) -> int:
+        """在调用方事务内登记一份供数记录，返回记录 id。
+
+        handover_no 在同一任务内唯一；若已存在则由调用方通过
+        get_delivery_in 取回原记录，本函数不负责覆盖（唯一键会直接报错）。
+        记录保存的 revision 与 mapping 必须是同一事务内读到的当前状态。
+        """
+        cur = conn.execute(
+            "INSERT INTO deliveries "
+            "(dataset_id, handover_no, revision, mapping_json, csv_content, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (dataset_id, handover_no, revision, json.dumps(list(mapping)),
+             sqlite3.Binary(csv_content), _now()),
+        )
+        return int(cur.lastrowid)
+
+    def get_delivery_in(self, conn: sqlite3.Connection, dataset_id: int,
+                        handover_no: str) -> Optional[sqlite3.Row]:
+        return conn.execute(
+            "SELECT * FROM deliveries WHERE dataset_id = ? AND handover_no = ?",
+            (dataset_id, handover_no),
+        ).fetchone()
+
+    def list_deliveries_in(self, conn: sqlite3.Connection,
+                           dataset_id: int) -> List[sqlite3.Row]:
+        return list(conn.execute(
+            "SELECT * FROM deliveries WHERE dataset_id = ? ORDER BY id",
+            (dataset_id,),
+        ).fetchall())
 
     def add_lock(self, dataset_id: int, left_id: str, right_id: str) -> None:
         with self.transaction() as conn:
