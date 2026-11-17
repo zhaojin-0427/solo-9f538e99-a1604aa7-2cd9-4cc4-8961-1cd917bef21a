@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}上传 CSV · SNP 指纹核对{% endblock %}
+{% block body %}
+<h1>新建核对任务</h1>
+<div class="card">
+  <form method="post" enctype="multipart/form-data">
+    <table>
+      <tr><th class="id">匿名侧文件（外包测序结果）</th>
+        <td style="text-align:left"><input type="file" name="left_csv" accept=".csv,text/csv" required></td></tr>
+      <tr><th class="id">院内侧文件（库存编号指纹）</th>
+        <td style="text-align:left"><input type="file" name="right_csv" accept=".csv,text/csv" required></td></tr>
+      <tr><th class="id">匿名侧标签（可选）</th>
+        <td style="text-align:left"><input type="text" name="left_label" value="匿名侧（测序结果）" size="28"></td></tr>
+      <tr><th class="id">院内侧标签（可选）</th>
+        <td style="text-align:left"><input type="text" name="right_label" value="院内侧（库存编号）" size="28"></td></tr>
+    </table>
+    <p><button class="btn btn-primary" type="submit">上传并计算</button></p>
+  </form>
+  <p class="muted">
+    CSV 要求：UTF-8 编码，首行为表头 <code>sample_id,SNP1,…,SNP6</code>；每份 1～12 个唯一样本号，
+    位点值仅允许 <code>0</code>/<code>1</code>/<code>2</code> 或留空（缺失）；两份文件位点名与顺序一致、样本数相同。
+  </p>
+</div>
+{% endblock %}

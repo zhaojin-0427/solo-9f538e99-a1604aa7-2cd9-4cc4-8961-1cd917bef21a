@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}SNP 指纹核对{% endblock %}</title>
+  <style>
+    :root { --line:#d7dce3; --blue:#1f5fbf; --red:#c0392b; --green:#1e7e34; --bg:#f5f7fa; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: "PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+           background:var(--bg); color:#1f2933; }
+    header { background:#16324f; color:#fff; padding:14px 24px; }
+    header a { color:#cfe0ff; text-decoration:none; margin-right:16px; }
+    main { max-width:1180px; margin:24px auto; padding:0 20px; }
+    h1,h2,h3 { color:#16324f; }
+    .card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:18px 22px; margin-bottom:20px; }
+    table { border-collapse:collapse; width:100%; font-size:14px; }
+    th,td { border:1px solid var(--line); padding:7px 10px; text-align:center; }
+    th { background:#eef2f7; }
+    td.id, th.id { text-align:left; font-weight:600; white-space:nowrap; }
+    .flash { padding:10px 16px; border-radius:6px; margin-bottom:12px; font-size:14px; }
+    .flash.error { background:#fdecea; border:1px solid #f5c6cb; color:var(--red); }
+    .flash.info  { background:#e8f1ff; border:1px solid #b8d4f5; color:var(--blue); }
+    .btn { display:inline-block; border:0; border-radius:6px; padding:7px 16px; font-size:14px;
+           cursor:pointer; text-decoration:none; }
+    .btn-primary { background:var(--blue); color:#fff; }
+    .btn-danger  { background:var(--red); color:#fff; }
+    .btn-muted   { background:#e4e8ed; color:#555; cursor:not-allowed; }
+    .tag { display:inline-block; padding:2px 9px; border-radius:10px; font-size:12px; }
+    .tag-ok { background:#e3f4e8; color:var(--green); }
+    .tag-warn { background:#fff3cd; color:#8a6d1d; }
+    .tag-bad { background:#fdecea; color:var(--red); }
+    .muted { color:#6b7280; font-size:13px; }
+    form.inline { display:inline; }
+    .miss { color:#9aa3ad; }
+    .mm { color:var(--red); font-weight:700; }
+    .ok { color:var(--green); }
+    .locked-row { background:#f3f8ff; }
+    code { background:#eef2f7; padding:1px 6px; border-radius:4px; }
+  </style>
+</head>
+<body>
+<header>
+  <strong>SNP 指纹匿名样本核对系统</strong>
+  <nav style="display:inline-block;margin-left:24px">
+    <a href="{{ url_for('index') }}">任务列表</a>
+    <a href="{{ url_for('upload_form') }}">新建核对任务</a>
+  </nav>
+</header>
+<main>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in messages %}
+      <div class="flash {{ category }}">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+  {% block body %}{% endblock %}
+</main>
+</body>
+</html>

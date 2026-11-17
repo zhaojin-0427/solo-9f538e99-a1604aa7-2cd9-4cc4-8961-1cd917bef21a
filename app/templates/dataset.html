@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}任务 #{{ row.id }} 核对详情{% endblock %}
+{% block body %}
+<h1>核对任务 #{{ row.id }}
+  {% if result.feasible %}<span class="tag tag-ok">可配对</span>
+  {% else %}<span class="tag tag-bad">无解</span>{% endif %}
+  <span class="tag tag-warn">修订号 r{{ row.revision }}</span>
+</h1>
+
+<div class="card">
+  <p>
+    <strong>{{ row.left_label }}</strong> ↔ <strong>{{ row.right_label }}</strong>
+    ｜位点数：{{ loci|length }}（{{ loci|join('、') }}）
+    ｜样本数：每侧 {{ result.left_ids|length }} 个
+    {% if result.feasible %}
+      ｜<strong>最优不一致位点总数：{{ result.optimum }}</strong>
+      （当前锁定下最优值：{{ result.forced_total }}）
+    {% endif %}
+  </p>
+  <p class="muted">
+    配对规则：两侧均非空的位点 ≥ 3 个，且不一致位点数 ≤ 1。候选为“全部最优一对一对应”中出现过的右侧样本；
+    锁定依据外部证据，系统会拒绝破坏原始最优值或导致无解的选择。多人协作时请基于当前修订号操作，旧页面提交将被拒绝。
+  </p>
+</div>
+
+{% if not result.feasible %}
+<div class="card">
+  <h2>无解原因</h2>
+  <p class="flash error" style="margin:0">{{ result.reason }}</p>
+  {% if result.blocked_left or result.blocked_right %}
+  <p class="muted" style="margin-top:10px">
+    {% if result.blocked_left %}无可配右侧的左侧样本：{{ result.blocked_left|join('、') }}<br>{% endif %}
+    {% if result.blocked_right %}无可配左侧的右侧样本：{{ result.blocked_right|join('、') }}{% endif %}
+  </p>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if result.feasible %}
+<div class="card">
+  <h2>逐样本候选与锁定</h2>
+  <table>
+    <thead><tr>
+      <th class="id">匿名侧样本</th>
+      <th>状态</th>
+      <th>候选院内编号（共非空位点数 / 不一致数）</th>
+      <th>操作</th>
+    </tr></thead>
+    <tbody>
+    {% for lid in result.left_ids %}
+      {% set locked_rid = locks.get(lid) %}
+      <tr class="{{ 'locked-row' if locked_rid }}">
+        <td class="id">{{ lid }}</td>
+        <td>
+          {% if locked_rid %}<span class="tag tag-ok">已锁定 → {{ locked_rid }}</span>
+          {% elif candidate_details[lid]|length == 1 %}<span class="tag tag-ok">唯一</span>
+          {% else %}<span class="tag tag-warn">歧义 {{ candidate_details[lid]|length }} 选 1</span>{% endif %}
+        </td>
+        <td style="text-align:left">
+          {% for c in candidate_details[lid] %}
+            <span style="display:inline-block;margin:3px 8px 3px 0">
+              <strong>{{ c.right_id }}</strong>
+              <span class="muted">（共 {{ c.shared }} 位点 / 异 {{ c.mismatches }} 位点）</span>
+              {% if c.locked %}<span class="tag tag-ok">锁定中</span>{% endif %}
+            </span>
+          {% else %}
+            <span class="tag tag-bad">当前锁定下无候选</span>
+          {% endfor %}
+        </td>
+        <td style="white-space:nowrap">
+          {% if locked_rid %}
+            <form class="inline" method="post"
+                  action="{{ url_for('unlock_candidate', dataset_id=row.id) }}">
+              <input type="hidden" name="revision" value="{{ row.revision }}">
+              <input type="hidden" name="left_id" value="{{ lid }}">
+              <button class="btn btn-danger" type="submit">解除锁定</button>
+            </form>
+          {% else %}
+            {% for c in candidate_details[lid] %}
+              <form class="inline" method="post"
+                    action="{{ url_for('lock_candidate', dataset_id=row.id) }}">
+                <input type="hidden" name="revision" value="{{ row.revision }}">
+                <input type="hidden" name="left_id" value="{{ lid }}">
+                <input type="hidden" name="right_id" value="{{ c.right_id }}">
+                <button class="btn {{ 'btn-primary' if candidate_details[lid]|length > 1 else 'btn-muted' }}"
+                        type="submit"
+                        title="锁定 {{ lid }} ↔ {{ c.right_id }}">锁定 {{ c.right_id }}</button>
+              </form>
+            {% endfor %}
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>全部样本对核对矩阵</h2>
+  <p class="muted">单元格“共 n / 异 m”：n 为两侧均非空位点数，m 为不一致数；
+    <span class="ok">绿底</span>为可配对，<span class="mm">红叉</span>为不满足配对前提。</p>
+  <table>
+    <thead><tr><th class="id">匿名侧 ＼ 院内侧</th>
+      {% for rid in result.right_ids %}<th class="id">{{ rid }}</th>{% endfor %}
+    </tr></thead>
+    <tbody>
+    {% for lid in result.left_ids %}
+      <tr>
+        <td class="id">{{ lid }}{% if locks.get(lid) %} → <span class="tag tag-ok">{{ locks.get(lid) }}</span>{% endif %}</td>
+        {% for rid in result.right_ids %}
+          {% set info = result.pair_infos[(lid, rid)] %}
+          {% if info.eligible %}
+            <td class="ok" style="background:#f1f9f3">共 {{ info.shared }} / 异 {{ info.mismatches }}</td>
+          {% else %}
+            <td class="mm">✗ 共 {{ info.shared }} / 异 {{ info.mismatches }}</td>
+          {% endif %}
+        {% endfor %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>下载编号对照 CSV</h2>
+  {% if all_resolved %}
+    <p>全部 {{ result.left_ids|length }} 个样本候选均已唯一，可以供数。</p>
+    <a class="btn btn-primary" href="{{ url_for('download_mapping', dataset_id=row.id) }}">下载编号对照 CSV</a>
+  {% else %}
+    <p>仍有样本存在歧义，按规定<strong>不得供数</strong>。请继续依据外部证据锁定，直到全部样本候选唯一。</p>
+    <button class="btn btn-muted" disabled>下载（需全部唯一）</button>
+    <p class="muted">尚未唯一的样本：
+      {% for lid in result.left_ids %}
+        {% if result.candidates[lid]|length != 1 and not locks.get(lid) %}<code>{{ lid }}</code>（{{ result.candidates[lid]|length }} 个候选）{% endif %}
+      {% endfor %}
+    </p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

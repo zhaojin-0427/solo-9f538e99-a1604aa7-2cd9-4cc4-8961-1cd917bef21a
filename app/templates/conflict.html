@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}修订冲突 · SNP 指纹核对{% endblock %}
+{% block body %}
+<div class="card">
+  <h1>提交被拒绝（修订号过期）</h1>
+  <p class="flash error" style="margin:0">{{ message }}</p>
+  <p style="margin-top:14px">
+    {% if dataset_id %}
+      <a class="btn btn-primary" href="{{ url_for('dataset_detail', dataset_id=dataset_id) }}">刷新到最新页面</a>
+    {% else %}
+      <a class="btn btn-primary" href="{{ url_for('index') }}">返回任务列表</a>
+    {% endif %}
+  </p>
+  <p class="muted">系统采用“按所见修订提交”的乐观并发控制：您的判断不会被静默覆盖，他人的修改也不会被旧页面冲掉。</p>
+</div>
+{% endblock %}
